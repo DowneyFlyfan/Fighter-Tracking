@@ -1,16 +1,16 @@
 #pragma once
 
-#include <omp.h>
+#include "../types.h"
 
 #include <array>
+#include <omp.h>
 
-#include "../types.h"
 #include "bit_pattern_21.h"
 
 typedef std::array<std::array<std::array<float, 25>, 25>, 40> PatchArray;
 
 // Clamp (x,y) to [0,24] and return the pixel value from the 25x25 patch
-inline float sample_pixel(const std::array<std::array<float, 25>, 25>& patch,
+inline float sample_pixel(const std::array<std::array<float, 25>, 25> &patch,
                           int x, int y) {
     x = std::max(0, std::min(24, x));
     y = std::max(0, std::min(24, y));
@@ -19,8 +19,8 @@ inline float sample_pixel(const std::array<std::array<float, 25>, 25>& patch,
 
 // Extract 256-bit binary descriptors from 40 patches using ORB (Oriented FAST
 // and Rotated BRIEF) bit pattern
-inline std::array<std::array<int, 256>, 40> extract_descriptors(
-    const PatchArray& patches) {
+inline std::array<std::array<int, 256>, 40>
+extract_descriptors(const PatchArray &patches) {
     std::array<std::array<int, 256>, 40> descriptors;
 #pragma omp parallel for
     for (int i = 0; i < 40; ++i) {
@@ -39,18 +39,19 @@ inline std::array<std::array<int, 256>, 40> extract_descriptors(
 }
 
 // Compute Hamming distance between two 256-bit binary descriptors
-inline int hamming_distance(const std::array<int, 256>& a,
-                            const std::array<int, 256>& b) {
+inline int hamming_distance(const std::array<int, 256> &a,
+                            const std::array<int, 256> &b) {
     int dist = 0;
-    for (int i = 0; i < 256; ++i) dist += (a[i] != b[i]);
+    for (int i = 0; i < 256; ++i)
+        dist += (a[i] != b[i]);
     return dist;
 }
 
 // Brute-force nearest-neighbor matching using Hamming distance.
 // Returns array of {query_idx, best_train_idx, best_distance}.
-inline std::array<std::array<float, 3>, 40> match_descriptors(
-    const std::array<std::array<int, 256>, 40>& query,
-    const std::array<std::array<int, 256>, 40>& train) {
+inline std::array<std::array<float, 3>, 40>
+match_descriptors(const std::array<std::array<int, 256>, 40> &query,
+                  const std::array<std::array<int, 256>, 40> &train) {
     std::array<std::array<float, 3>, 40> matches;
 
 #pragma omp parallel for
@@ -64,10 +65,8 @@ inline std::array<std::array<float, 3>, 40> match_descriptors(
                 best_idx = j;
             }
         }
-        matches[i] = {
-            static_cast<float>(i), static_cast<float>(best_idx),
-            static_cast<float>(
-                best_dist)};  // WARN: So 1st train index is default best index
+        matches[i] = {static_cast<float>(i), static_cast<float>(best_idx),
+                      static_cast<float>(best_dist)};
     }
 
     return matches;

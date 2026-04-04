@@ -6,6 +6,11 @@ CompileFlags:
     - -I/usr/include/x86_64-linux-gnu
     - -I/home/downeyflyfan/Research_Projects/Track/CPP-Track/hspeedtrack_x86/stubs
     - -ferror-limit=0
+    - -D__device_builtin__=
+    - -D__host__=
+    - -D__device__=
+    - -D__cudart_builtin__=
+    - -DCUDARTAPI=
   Remove:
     - -D__CUDACC__
     - --cuda-gpu-arch=*

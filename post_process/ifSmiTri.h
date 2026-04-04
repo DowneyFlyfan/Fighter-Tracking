@@ -2,128 +2,135 @@
 
 #include "../types.h"
 
-#include <vector>
-#include <array>
-#include <limits>
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <vector>
 
-inline constexpr float big_diff = 1.0f;
-inline constexpr float small_diff = 1.0f;
+inline constexpr float SPREAD_THRESH = 1.0f;
+inline constexpr float SHIFT_THRESH = 1.0f;
 
-struct if_SmiTri_result {
-    bool choose;
+struct SmiTriCheck {
+    bool apply;
     std::vector<Point> src_points;
     std::vector<Point> dst_points;
 };
 
 // Determine whether to apply similar triangle (SmiTri) correction
-// based on extremal keypoint spread in both source and destination frames
-inline if_SmiTri_result IfSmiTri(const std::vector<Point>& src_pts, const std::vector<Point>& dst_pts)
-{
-    if_SmiTri_result ifsmiTriresult;
-    ifsmiTriresult.choose = false;
+// based on extremal keypoint spread in both source and destination frames.
+// Returns up to 4 extremal points (xmax, xmin, ymax, ymin) that pass
+// spread and shift criteria.
+inline SmiTriCheck CheckSmiTri(const std::vector<Point> &src_pts,
+                               const std::vector<Point> &dst_pts) {
+    SmiTriCheck result;
+    result.apply = false;
 
     // Find indices of extremal points (max/min x and y)
-    int idx_max_x = 0, idx_min_x = 0, idx_max_y = 0, idx_min_y = 0;
-    for (size_t i = 1; i < src_pts.size(); ++i) {
-        if (src_pts[i][0] > src_pts[idx_max_x][0]) idx_max_x = i;
-        if (src_pts[i][0] < src_pts[idx_min_x][0]) idx_min_x = i;
-        if (src_pts[i][1] > src_pts[idx_max_y][1]) idx_max_y = i;
-        if (src_pts[i][1] < src_pts[idx_min_y][1]) idx_min_y = i;
+    int idx_xmax = 0, idx_xmin = 0, idx_ymax = 0, idx_ymin = 0;
+    for (int i = 1; i < static_cast<int>(src_pts.size()); ++i) {
+        if (src_pts[i][0] > src_pts[idx_xmax][0])
+            idx_xmax = i;
+        if (src_pts[i][0] < src_pts[idx_xmin][0])
+            idx_xmin = i;
+        if (src_pts[i][1] > src_pts[idx_ymax][1])
+            idx_ymax = i;
+        if (src_pts[i][1] < src_pts[idx_ymin][1])
+            idx_ymin = i;
     }
 
-    // Build extremal point set (order: xmax, xmin, ymax, ymin)
-    std::array<int, 4> xxyy_idx = {idx_max_x, idx_min_x, idx_max_y, idx_min_y};
-    std::array<Point, 4> src_xxyy_pts, dst_xxyy_pts;
+    // Gather extremal points from both frames (order: xmax, xmin, ymax, ymin)
+    std::array<int, 4> ext_idx = {idx_xmax, idx_xmin, idx_ymax, idx_ymin};
+    std::array<Point, 4> src_ext, dst_ext;
     for (int i = 0; i < 4; ++i) {
-        src_xxyy_pts[i] = src_pts[xxyy_idx[i]];
-        dst_xxyy_pts[i] = dst_pts[xxyy_idx[i]];
+        src_ext[i] = src_pts[ext_idx[i]];
+        dst_ext[i] = dst_pts[ext_idx[i]];
     }
 
-    // Extract extremal coordinates
-    float src_max_x = src_xxyy_pts[0][0], src_min_x = src_xxyy_pts[1][0];
-    float src_max_y = src_xxyy_pts[2][1], src_min_y = src_xxyy_pts[3][1];
-    float dst_max_x = dst_xxyy_pts[0][0], dst_min_x = dst_xxyy_pts[1][0];
-    float dst_max_y = dst_xxyy_pts[2][1], dst_min_y = dst_xxyy_pts[3][1];
+    // Spreads: how wide the extremal points span in each axis
+    float src_x_spread = std::abs(src_ext[0][0] - src_ext[1][0]);
+    float src_y_spread = std::abs(src_ext[2][1] - src_ext[3][1]);
+    float dst_x_spread = std::abs(dst_ext[0][0] - dst_ext[1][0]);
+    float dst_y_spread = std::abs(dst_ext[2][1] - dst_ext[3][1]);
 
-    float src_xmax_y = src_xxyy_pts[0][1], src_xmin_y = src_xxyy_pts[1][1];
-    float src_ymax_x = src_xxyy_pts[2][0], src_ymin_x = src_xxyy_pts[3][0];
-    float dst_xmax_y = dst_xxyy_pts[0][1], dst_xmin_y = dst_xxyy_pts[1][1];
-    float dst_ymax_x = dst_xxyy_pts[2][0], dst_ymin_x = dst_xxyy_pts[3][0];
+    // Shifts: how far each y-extremal point sticks out in y
+    // relative to both x-extremal points (take the min)
+    float src_ymax_shift =
+        std::min(std::abs(src_ext[2][1] - src_ext[0][1]),  // ymax.y vs xmax.y
+                 std::abs(src_ext[2][1] - src_ext[1][1])); // ymax.y vs xmin.y
+    float src_ymin_shift =
+        std::min(std::abs(src_ext[3][1] - src_ext[0][1]),  // ymin.y vs xmax.y
+                 std::abs(src_ext[3][1] - src_ext[1][1])); // ymin.y vs xmin.y
+    float dst_ymax_shift = std::min(std::abs(dst_ext[2][1] - dst_ext[0][1]),
+                                    std::abs(dst_ext[2][1] - dst_ext[1][1]));
+    float dst_ymin_shift = std::min(std::abs(dst_ext[3][1] - dst_ext[0][1]),
+                                    std::abs(dst_ext[3][1] - dst_ext[1][1]));
 
-    // Build difference arrays (a - b)
-    float a[20] = {
-        src_max_x, src_max_y, dst_max_x, dst_max_y,
-        src_max_y, src_min_y, dst_max_y, dst_min_y,
-        src_max_y, src_min_y, dst_max_y, dst_min_y,
-        src_max_x, src_min_x, dst_max_x, dst_min_x,
-        src_max_x, src_min_x, dst_max_x, dst_min_x
-    };
-    float b[20] = {
-        src_min_x, src_min_y, dst_min_x, dst_min_y,
-        src_xmin_y, src_xmin_y, dst_xmin_y, dst_xmin_y,
-        src_xmax_y, src_xmax_y, dst_xmax_y, dst_xmax_y,
-        src_ymax_x, src_ymax_x, dst_ymax_x, dst_ymax_x,
-        src_ymin_x, src_ymin_x, dst_ymin_x, dst_ymin_x
-    };
+    // Shifts: how far each x-extremal point sticks out in x
+    // relative to both y-extremal points (take the min)
+    float src_xmax_shift =
+        std::min(std::abs(src_ext[0][0] - src_ext[2][0]),  // xmax.x vs ymax.x
+                 std::abs(src_ext[0][0] - src_ext[3][0])); // xmax.x vs ymin.x
+    float src_xmin_shift = std::min(std::abs(src_ext[1][0] - src_ext[2][0]),
+                                    std::abs(src_ext[1][0] - src_ext[3][0]));
+    float dst_xmax_shift = std::min(std::abs(dst_ext[0][0] - dst_ext[2][0]),
+                                    std::abs(dst_ext[0][0] - dst_ext[3][0]));
+    float dst_xmin_shift = std::min(std::abs(dst_ext[1][0] - dst_ext[2][0]),
+                                    std::abs(dst_ext[1][0] - dst_ext[3][0]));
 
-    float diff[20];
-    std::transform(std::begin(a), std::end(a), std::begin(b), std::begin(diff),
-        [](float x, float y) { return std::abs(x - y); });
+    // Check if spreads are wide enough in both frames
+    bool x_wide =
+        src_x_spread >= SPREAD_THRESH && dst_x_spread >= SPREAD_THRESH;
+    bool y_wide =
+        src_y_spread >= SPREAD_THRESH && dst_y_spread >= SPREAD_THRESH;
 
-    // Compute y-direction and x-direction shifts
-    float src_ymax_shift = std::min(diff[4], diff[8]);
-    float src_ymin_shift = std::min(diff[5], diff[9]);
-    float dst_ymax_shift = std::min(diff[6], diff[10]);
-    float dst_ymin_shift = std::min(diff[7], diff[11]);
+    // Check if shifts are significant in both frames
+    bool ymax_shifted =
+        src_ymax_shift >= SHIFT_THRESH && dst_ymax_shift >= SHIFT_THRESH;
+    bool ymin_shifted =
+        src_ymin_shift >= SHIFT_THRESH && dst_ymin_shift >= SHIFT_THRESH;
+    bool xmax_shifted =
+        src_xmax_shift >= SHIFT_THRESH && dst_xmax_shift >= SHIFT_THRESH;
+    bool xmin_shifted =
+        src_xmin_shift >= SHIFT_THRESH && dst_xmin_shift >= SHIFT_THRESH;
 
-    float src_xmax_shift = std::min(diff[12], diff[16]);
-    float src_xmin_shift = std::min(diff[13], diff[17]);
-    float dst_xmax_shift = std::min(diff[14], diff[18]);
-    float dst_xmin_shift = std::min(diff[15], diff[19]);
+    // Which axis dominates?
+    bool x_dominant = src_x_spread >= src_y_spread;
 
-    // Condition checks
-    bool x_bigger_4 = diff[0] >= big_diff && diff[2] >= big_diff;
-    bool y_bigger_4 = diff[1] >= big_diff && diff[3] >= big_diff;
-    bool ymax_x_bigger_2 = src_ymax_shift >= small_diff && dst_ymax_shift >= small_diff;
-    bool ymin_x_bigger_2 = src_ymin_shift >= small_diff && dst_ymin_shift >= small_diff;
-    bool xmax_y_bigger_2 = src_xmax_shift >= small_diff && dst_xmax_shift >= small_diff;
-    bool xmin_y_bigger_2 = src_xmin_shift >= small_diff && dst_xmin_shift >= small_diff;
+    // Within the secondary axis, which extremal point shifts more?
+    bool ymax_more = src_ymax_shift >= src_ymin_shift;
+    bool xmax_more = src_xmax_shift >= src_xmin_shift;
 
-    bool x_bigger_y = diff[0] >= diff[1];
-    bool ymax_shift_bigger = src_ymax_shift >= src_ymin_shift;
-    bool xmax_shift_bigger = src_xmax_shift >= src_xmin_shift;
+    // Decision: x-dominant path needs wide x-spread + any y-shift,
+    //           y-dominant path needs wide y-spread + any x-shift
+    bool x_path = x_dominant && x_wide;
+    bool y_path = !x_dominant && y_wide;
+    bool best_y_shifted =
+        (ymax_more && ymax_shifted) || (!ymax_more && ymin_shifted);
+    bool best_x_shifted =
+        (xmax_more && xmax_shifted) || (!xmax_more && xmin_shifted);
 
-    // Compound conditions (condition_a AND condition_b)
-    bool condition_a[6] = {x_bigger_y, ymax_shift_bigger, !ymax_shift_bigger, !x_bigger_y, xmax_shift_bigger, !xmax_shift_bigger};
-    bool condition_b[6] = {x_bigger_4, ymax_x_bigger_2, ymin_x_bigger_2, y_bigger_4, xmax_y_bigger_2, xmin_y_bigger_2};
+    bool apply = (x_path && best_y_shifted) || (y_path && best_x_shifted);
+    result.apply = apply;
 
-    bool condition_result[6];
-    for (int i = 0; i < 6; ++i)
-        condition_result[i] = condition_a[i] && condition_b[i];
+    // Select which extremal points to output:
+    // - Both x-extremals if x-dominant path, or if the specific one is shifted
+    // - Both y-extremals if y-dominant path, or if the specific one is shifted
+    bool select_xmax =
+        (x_path || (y_path && xmax_more && xmax_shifted)) && apply;
+    bool select_xmin =
+        (x_path || (y_path && !xmax_more && xmin_shifted)) && apply;
+    bool select_ymax =
+        (y_path || (x_path && ymax_more && ymax_shifted)) && apply;
+    bool select_ymin =
+        (y_path || (x_path && !ymax_more && ymin_shifted)) && apply;
 
-    // Final selection logic
-    bool choose = (condition_result[0] && (condition_result[1] || condition_result[2])) ||
-                  (condition_result[3] && (condition_result[4] || condition_result[5]));
-
-    ifsmiTriresult.choose = choose;
-
-    // Build mask: determine which extremal points to output
-    bool mask[4] = {
-        (condition_result[0] || (condition_result[3] && condition_result[4])) && choose,
-        (condition_result[0] || (condition_result[3] && condition_result[5])) && choose,
-        (condition_result[3] || (condition_result[0] && condition_result[1])) && choose,
-        (condition_result[3] || (condition_result[0] && condition_result[2])) && choose
-    };
-
-    // Collect selected points
+    bool mask[4] = {select_xmax, select_xmin, select_ymax, select_ymin};
     for (int i = 0; i < 4; ++i) {
         if (mask[i]) {
-            ifsmiTriresult.src_points.push_back(src_xxyy_pts[i]);
-            ifsmiTriresult.dst_points.push_back(dst_xxyy_pts[i]);
+            result.src_points.push_back(src_ext[i]);
+            result.dst_points.push_back(dst_ext[i]);
         }
     }
 
-    return ifsmiTriresult;
+    return result;
 }

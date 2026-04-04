@@ -2,15 +2,21 @@
 
 #include "../types.h"
 
-#include <vector>
-#include <array>
 #include <algorithm>
-#include <numeric>
+#include <array>
 #include <cmath>
+#include <numeric>
 #include <unordered_map>
+#include <vector>
 
-inline constexpr int N = 40;
-inline constexpr int keep = 26;
+inline constexpr int NUM_KPTS = 40;
+inline constexpr int TOP_K = 26;
+inline constexpr float NORM_SCALE = 255.0f;
+inline constexpr float PERCENTILE_70_LOW = 0.5f;
+inline constexpr float PERCENTILE_70_HIGH = 0.5f;
+inline constexpr int PERCENTILE_IDX_LO = 17;
+inline constexpr int PERCENTILE_IDX_HI = 18;
+inline constexpr float MODE_RANGE = 2.0f;
 
 struct FilterKptsResult {
     std::vector<Point> src_pts;
@@ -18,130 +24,117 @@ struct FilterKptsResult {
     std::vector<Descriptor> dst_dscrp;
 };
 
-// Filter keypoint matches by 70th percentile of normalized displacement norm
-inline FilterKptsResult FilterKpts(const std::array<Match, 40>& matches,
-                const std::array<Point, 40>& kp_last,
-                const std::array<Point, 40>& kp_curr,
-                const std::array<Descriptor, 40>& dscrp_curr)
-{
-    // 1. Sort matches by distance (ascending), using index-based sorting
-    std::vector<int> indices(40);
+struct TopKMatches {
+    std::array<Point, TOP_K> src_pts;
+    std::array<Point, TOP_K> dst_pts;
+    std::array<Descriptor, TOP_K> dst_dscrp;
+};
+
+// Sort matches by Hamming distance, return top-K matched keypoints
+inline TopKMatches
+ExtractTopKMatches(const std::array<Match, NUM_KPTS> &matches,
+                   const std::array<Point, NUM_KPTS> &kp_last,
+                   const std::array<Point, NUM_KPTS> &kp_curr,
+                   const std::array<Descriptor, NUM_KPTS> &dscrp_curr) {
+    std::array<int, NUM_KPTS> indices;
     std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-        return matches[a][2] < matches[b][2];
-    });
+    std::sort(indices.begin(), indices.end(),
+              [&](int a, int b) { return matches[a][2] < matches[b][2]; });
 
-    // 2. Select top K matches
-    std::array<Match, 26> final_matches;
-    for (int i = 0; i < 26; ++i) {
-        final_matches[i] = matches[indices[i]];
-    }
-
-    // 3. Extract keypoint coordinates and descriptors (swap y,x to x,y)
-    std::vector<Point> src_pts_matched;
-    std::vector<Point> dst_pts_matched;
-    std::vector<Descriptor> dst_dscrp;
-
-    for (const auto& m : final_matches) {
+    TopKMatches top_k;
+    for (int i = 0; i < TOP_K; ++i) {
+        const auto &m = matches[indices[i]];
         int src_idx = static_cast<int>(m[0]);
         int dst_idx = static_cast<int>(m[1]);
-        src_pts_matched.push_back({kp_last[src_idx][1], kp_last[src_idx][0]});
-        dst_pts_matched.push_back({kp_curr[dst_idx][1], kp_curr[dst_idx][0]});
-        dst_dscrp.push_back(dscrp_curr[dst_idx]);
+        top_k.src_pts[i] = kp_last[src_idx];
+        top_k.dst_pts[i] = kp_curr[dst_idx];
+        top_k.dst_dscrp[i] = dscrp_curr[dst_idx];
     }
-
-    // 4. Compute displacement norms (normalized by 255)
-    std::vector<float> norms;
-    for (size_t i = 0; i < 26; ++i) {
-        float dx = (dst_pts_matched[i][0] - src_pts_matched[i][0]) / 255.0f;
-        float dy = (dst_pts_matched[i][1] - src_pts_matched[i][1]) / 255.0f;
-        float norm = std::sqrt(dx * dx + dy * dy);
-        norms.push_back(norm);
-    }
-
-    // 5. Compute 70th percentile (26 * 0.7 = 18.2, interpolate between index 17 and 18)
-    std::vector<float> sorted_norms = norms;
-    std::sort(sorted_norms.begin(), sorted_norms.end());
-    float q3 = 0.5f * sorted_norms[17] + 0.5f * sorted_norms[18];
-
-    // 6. Filter out points exceeding the 70th percentile
-    FilterKptsResult filterkptsresult;
-    for (size_t i = 0; i < norms.size(); ++i) {
-        if (norms[i] <= q3) {
-            filterkptsresult.src_pts.push_back(src_pts_matched[i]);
-            filterkptsresult.dst_pts.push_back(dst_pts_matched[i]);
-            filterkptsresult.dst_dscrp.push_back(dst_dscrp[i]);
-        }
-    }
-
-    return filterkptsresult;
+    return top_k;
 }
 
-// Filter keypoint matches using mode-based outlier rejection (within +/-2 of mode)
-inline FilterKptsResult FilterKptsMode(const std::array<Match, 40>& matches,
-                const std::array<Point, 40>& kp_last,
-                const std::array<Point, 40>& kp_curr,
-                const std::array<Descriptor, 40>& dscrp_curr)
-{
-    // 1. Sort matches by distance (ascending)
-    std::vector<int> indices(40);
-    std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-        return matches[a][2] < matches[b][2];
-    });
-
-    // 2. Select top K matches
-    std::array<Match, 26> final_matches;
-    for (int i = 0; i < 26; ++i) {
-        final_matches[i] = matches[indices[i]];
+// Compute displacement norms (Euclidean Distance) between matched keypoint
+// pairs
+inline std::array<float, TOP_K>
+ComputeNorms(const std::array<Point, TOP_K> &src_pts,
+             const std::array<Point, TOP_K> &dst_pts, float scale) {
+    std::array<float, TOP_K> norms;
+    for (int i = 0; i < TOP_K; ++i) {
+        float dx = (dst_pts[i][0] - src_pts[i][0]) / scale;
+        float dy = (dst_pts[i][1] - src_pts[i][1]) / scale;
+        norms[i] = std::sqrt(dx * dx + dy * dy);
     }
+    return norms;
+}
 
-    // 3. Extract keypoint coordinates and descriptors (swap y,x to x,y)
-    std::vector<Point> src_pts_matched;
-    std::vector<Point> dst_pts_matched;
-    std::vector<Descriptor> dst_dscrp;
+// Filter keypoint matches by 70th percentile of normalized displacement norm
+inline FilterKptsResult
+FilterKpts(const std::array<Match, NUM_KPTS> &matches,
+           const std::array<Point, NUM_KPTS> &kp_last,
+           const std::array<Point, NUM_KPTS> &kp_curr,
+           const std::array<Descriptor, NUM_KPTS> &dscrp_curr) {
+    auto top_k = ExtractTopKMatches(matches, kp_last, kp_curr, dscrp_curr);
+    auto norms = ComputeNorms(top_k.src_pts, top_k.dst_pts, NORM_SCALE);
 
-    for (const auto& m : final_matches) {
-        int src_idx = static_cast<int>(m[0]);
-        int dst_idx = static_cast<int>(m[1]);
-        src_pts_matched.push_back({kp_last[src_idx][1], kp_last[src_idx][0]});
-        dst_pts_matched.push_back({kp_curr[dst_idx][1], kp_curr[dst_idx][0]});
-        dst_dscrp.push_back(dscrp_curr[dst_idx]);
-    }
+    // Compute 70th percentile threshold
+    std::array<float, TOP_K> sorted_norms = norms;
+    std::sort(sorted_norms.begin(), sorted_norms.end());
+    float threshold = PERCENTILE_70_LOW * sorted_norms[PERCENTILE_IDX_LO] +
+                      PERCENTILE_70_HIGH * sorted_norms[PERCENTILE_IDX_HI];
 
-    // 4. Compute displacement norms (raw, not normalized)
-    std::vector<float> norms;
-    for (size_t i = 0; i < 26; ++i) {
-        float dx = (dst_pts_matched[i][0] - src_pts_matched[i][0]);
-        float dy = (dst_pts_matched[i][1] - src_pts_matched[i][1]);
-        float norm = std::sqrt(dx * dx + dy * dy);
-        norms.push_back(norm);
-    }
-
-    // 5. Find mode using histogram frequency count
-    std::unordered_map<float, int> freqMap;
-    for (float val : norms) {
-        freqMap[val]++;
-    }
-
-    float mode = norms[0];
-    int maxCount = 0;
-    for (const auto& [val, count] : freqMap) {
-        if (count > maxCount) {
-            maxCount = count;
-            mode = val;
+    // Keep points within the percentile
+    FilterKptsResult result;
+    for (int i = 0; i < TOP_K; ++i) {
+        if (norms[i] <= threshold) {
+            result.src_pts.push_back(top_k.src_pts[i]);
+            result.dst_pts.push_back(top_k.dst_pts[i]);
+            result.dst_dscrp.push_back(top_k.dst_dscrp[i]);
         }
     }
+    return result;
+}
 
-    // 6. Keep points within +/-2.0 of the mode
-    FilterKptsResult filterkptsresult;
-    for (size_t i = 0; i < 26; ++i) {
-        if (norms[i] >= mode - 2.0f && norms[i] <= mode + 2.0f) {
-            filterkptsresult.src_pts.push_back(src_pts_matched[i]);
-            filterkptsresult.dst_pts.push_back(dst_pts_matched[i]);
-            filterkptsresult.dst_dscrp.push_back(dst_dscrp[i]);
-        }
+// Filter keypoint matches using mode-based outlier rejection (within +/-
+// MODE_RANGE of mode)
+inline FilterKptsResult
+FilterKptsMode(const std::array<Match, NUM_KPTS> &matches,
+               const std::array<Point, NUM_KPTS> &kp_last,
+               const std::array<Point, NUM_KPTS> &kp_curr,
+               const std::array<Descriptor, NUM_KPTS> &dscrp_curr) {
+    auto top_k = ExtractTopKMatches(matches, kp_last, kp_curr, dscrp_curr);
+
+    // Raw norms (scale = 1.0)
+    auto norms = ComputeNorms(top_k.src_pts, top_k.dst_pts, 1.0f);
+
+    // Find mode via frequency count (round to nearest integer to bin floats)
+    std::array<int, TOP_K> binned;
+    for (int i = 0; i < TOP_K; ++i) {
+        binned[i] = static_cast<int>(std::round(norms[i]));
     }
 
-    return filterkptsresult;
+    std::unordered_map<int, int> freq_map;
+    for (int val : binned) {
+        freq_map[val]++;
+    }
+
+    int mode_bin = binned[0];
+    int max_count = 0;
+    for (const auto &[val, count] : freq_map) {
+        if (count > max_count) {
+            max_count = count;
+            mode_bin = val;
+        }
+    }
+    float mode = static_cast<float>(mode_bin);
+
+    // Keep points within +/- MODE_RANGE of the mode
+    FilterKptsResult result;
+    for (int i = 0; i < TOP_K; ++i) {
+        if (norms[i] >= mode - MODE_RANGE && norms[i] <= mode + MODE_RANGE) {
+            result.src_pts.push_back(top_k.src_pts[i]);
+            result.dst_pts.push_back(top_k.dst_pts[i]);
+            result.dst_dscrp.push_back(top_k.dst_dscrp[i]);
+        }
+    }
+    return result;
 }
