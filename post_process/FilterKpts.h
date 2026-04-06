@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../types.h"
+#include "../utils/types.h"
 
 #include <algorithm>
 #include <array>
@@ -44,9 +44,8 @@ ExtractTopKMatches(const std::array<Match, NUM_KPTS> &matches,
     TopKMatches top_k;
     for (int i = 0; i < TOP_K; ++i) {
         const auto &m = matches[indices[i]];
-        int src_idx = static_cast<int>(m[0]);
         int dst_idx = static_cast<int>(m[1]);
-        top_k.src_pts[i] = kp_last[src_idx];
+        top_k.src_pts[i] = kp_last[m[0]];
         top_k.dst_pts[i] = kp_curr[dst_idx];
         top_k.dst_dscrp[i] = dscrp_curr[dst_idx];
     }

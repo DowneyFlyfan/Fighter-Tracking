@@ -14,20 +14,19 @@
 #include <unordered_map>
 #include <vector>
 
-#include "init_engine.h"
 #include "post_process/CtrCorrect.h"
 #include "post_process/FilterByBox.h"
 #include "post_process/FilterKpts.h"
 #include "post_process/MatchKptsCorrect.h"
 #include "post_process/SmiTri.h"
-#include "post_process/ifSmiTri.h"
-#include "types.h"
 #include "utils/box_size.h"
 #include "utils/descriptor_match.h"
 #include "utils/get_roi.h"
+#include "utils/init_engine.h"
 #include "utils/parallel_topk.h"
 #include "utils/slice.h"
 #include "utils/thresh.h"
+#include "utils/types.h"
 #include "utils/utils.h"
 
 using namespace nvinfer1;
@@ -45,6 +44,7 @@ constexpr int NUM_THREADS = 4;
 constexpr std::string_view ENGINE_FILE =
     "./engine_model/Norm_Grad_Response_Masked_Max_480.engine";
 constexpr std::string_view DATA_FOLDER = "./Datasets/test_imgs";
+constexpr cudaMemLocation loc = {.type = cudaMemLocationTypeHost};
 
 int frame_count = 0;
 
@@ -145,17 +145,12 @@ int main() {
                 std::memcpy(img, float_img.ptr<float>(),
                             sizeof(float) * ROI_SIZE * ROI_SIZE);
 
-                // First TensorRT (TRT = TensorRT) inference for gradient
-                // response, then prefetch x_max, y_max to CPU
+                // TRT
                 Grad_Response.context->enqueueV3(stream1);
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc,
-                                         0, stream1);
-                    cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc,
-                                         0, stream1);
-                }
+                cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
+                cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
                 cudaStreamSynchronize(stream1);
 
                 // Prefix sum on x_max and y_max
@@ -182,29 +177,18 @@ int main() {
                 std::tie(roi_tl_x, roi_tl_y) =
                     GetROI(roi, img_curr_np.ptr<uint8_t>(0), tgt_xywh_curr);
 
-                // Prefetch img to CPU (GPU read during enqueueV3 changes page
-                // state)
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(img,
-                                         ROI_SIZE * ROI_SIZE * sizeof(float),
-                                         loc, 0, stream1);
-                    cudaStreamSynchronize(stream1);
-                }
+                cudaMemPrefetchAsync(img, ROI_SIZE * ROI_SIZE * sizeof(float),
+                                     loc, 0, stream1);
+                cudaStreamSynchronize(stream1);
 
                 // Threshold to detect flame and convert to float
                 threshold(roi, flame_cover_mask, img, flame_signal_curr);
 
                 // Second TRT inference on ROI, then prefetch response to CPU
                 Grad_Response.context->enqueueV3(stream1);
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(response,
-                                         ROI_SIZE * ROI_SIZE * sizeof(float),
-                                         loc, 0, stream1);
-                }
+                cudaMemPrefetchAsync(response,
+                                     ROI_SIZE * ROI_SIZE * sizeof(float), loc,
+                                     0, stream1);
                 cudaStreamSynchronize(stream1);
 
                 // Top-K keypoint extraction from response map
@@ -264,14 +248,9 @@ int main() {
 
                 // Prefetch img to CPU (GPU read during enqueueV3 changes page
                 // state)
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(img,
-                                         ROI_SIZE * ROI_SIZE * sizeof(float),
-                                         loc, 0, stream1);
-                    cudaStreamSynchronize(stream1);
-                }
+                cudaMemPrefetchAsync(img, ROI_SIZE * ROI_SIZE * sizeof(float),
+                                     loc, 0, stream1);
+                cudaStreamSynchronize(stream1);
 
                 // Threshold and convert ROI
                 threshold(roi, flame_cover_mask, img, flame_signal_curr);
@@ -288,17 +267,13 @@ int main() {
                 // (all queued on stream1: inference → prefetch, executed in
                 // order)
                 Grad_Response.context->enqueueV3(stream1);
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(response,
-                                         ROI_SIZE * ROI_SIZE * sizeof(float),
-                                         loc, 0, stream1);
-                    cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc,
-                                         0, stream1);
-                    cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc,
-                                         0, stream1);
-                }
+                cudaMemPrefetchAsync(response,
+                                     ROI_SIZE * ROI_SIZE * sizeof(float), loc,
+                                     0, stream1);
+                cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
+                cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
 
                 // Erode flame mask on CPU while GPU inference + prefetch run
                 cv::Mat flame_cover_mask_mat(ROI_SIZE, ROI_SIZE, CV_32F,

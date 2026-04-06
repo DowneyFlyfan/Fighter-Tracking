@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../types.h"
+#include "../utils/types.h"
 
 #include <array>
 #include <limits>

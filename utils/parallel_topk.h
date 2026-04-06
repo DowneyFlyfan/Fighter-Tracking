@@ -6,7 +6,7 @@
 #include <array>
 #include <vector>
 
-#include "../types.h"
+#include "types.h"
 
 // Parallel top-K selection using per-thread sorted arrays, then partial_sort
 inline std::array<std::pair<float, int>, TOPK> topk_sorted_parallel(

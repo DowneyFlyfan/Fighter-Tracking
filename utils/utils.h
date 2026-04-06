@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "../types.h"
+#include "types.h"
 
 namespace fs = std::filesystem;
 
@@ -65,8 +65,8 @@ inline std::array<float, 4> shift_subtract(const float *x_sum_matrix,
                                            int h) {
     int x_out_len = ROI_SIZE - w;
     int y_out_len = ROI_SIZE - h;
-    std::vector<float> x_out(x_out_len);
-    std::vector<float> y_out(y_out_len);
+    std::array<float, ROI_SIZE> x_out{};
+    std::array<float, ROI_SIZE> y_out{};
 
     for (int i = 0; i < x_out_len; ++i) {
         x_out[i] = x_sum_matrix[i + w] - x_sum_matrix[i];
@@ -75,8 +75,8 @@ inline std::array<float, 4> shift_subtract(const float *x_sum_matrix,
         y_out[j] = y_sum_matrix[j + h] - y_sum_matrix[j];
     }
 
-    auto max_x = std::max_element(x_out.begin(), x_out.end());
-    auto max_y = std::max_element(y_out.begin(), y_out.end());
+    auto max_x = std::max_element(x_out.begin(), x_out.begin() + x_out_len);
+    auto max_y = std::max_element(y_out.begin(), y_out.begin() + y_out_len);
     auto index_x = std::distance(x_out.begin(), max_x);
     auto index_y = std::distance(y_out.begin(), max_y);
 

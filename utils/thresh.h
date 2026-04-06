@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../types.h"
+#include "types.h"
 
 // Convert uint8 ROI to float and produce a binary flame mask.
 // flame_cover_mask[i] = 0 where pixel > 254 (saturated), 1 otherwise.

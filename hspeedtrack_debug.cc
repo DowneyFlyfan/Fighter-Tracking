@@ -13,18 +13,18 @@
 #include <unordered_map>
 #include <vector>
 
-#include "types.h"
+#include "opencv2/core/hal/interface.h"
+#include "utils/types.h"
 
-#include "init_engine.h"
 #include "post_process/CtrCorrect.h"
 #include "post_process/FilterByBox.h"
 #include "post_process/FilterKpts.h"
 #include "post_process/MatchKptsCorrect.h"
 #include "post_process/SmiTri.h"
-#include "post_process/ifSmiTri.h"
 #include "utils/box_size.h"
 #include "utils/descriptor_match.h"
 #include "utils/get_roi.h"
+#include "utils/init_engine.h"
 #include "utils/parallel_topk.h"
 #include "utils/slice.h"
 #include "utils/thresh.h"
@@ -41,17 +41,20 @@ void bind_thread_to_core(int core_id) {
 }
 
 constexpr int NUM_THREADS = 4;
+constexpr std::string_view ENGINE_FILE =
+    "./engine_model/Norm_Grad_Response_Masked_Max_480.engine";
+constexpr std::string_view DATA_FOLDER = "./Datasets/test_imgs";
+constexpr cudaMemLocation loc = {.type = cudaMemLocationTypeHost};
+
 int frame_count = 0;
 
 int main() {
     bind_thread_to_core(0);
     omp_set_num_threads(NUM_THREADS);
-    std::cout << std::fixed << std::setprecision(16);
+    std::cout << std::fixed << std::setprecision(6);
 
     // Initialize TensorRT engine
-    const std::string engine_path =
-        "./engine_model/Norm_Grad_Response_Masked_Max_480.engine";
-    auto engine_opt = init_engine(engine_path);
+    auto engine_opt = init_engine(std::string(ENGINE_FILE));
     if (!engine_opt) {
         std::cerr << "Fatal: failed to initialize engine" << std::endl;
         return 1;
@@ -87,7 +90,7 @@ int main() {
     Box frangi_xyxy;
     MatchKptsCorrectResult OrbMatch_result;
 
-    auto sorted_entries = get_sorted_image_entries("./test_imgs/");
+    auto sorted_entries = get_sorted_image_entries(std::string(DATA_FOLDER));
 
     std::array<float, 4> tgt_xywh_curr, tgt_xywh_last, tgt_xywh_refined_last;
     std::array<Point, 40> kpts_for_patches, kpts_curr, kpts_last,
@@ -125,37 +128,38 @@ int main() {
             float w = boxsz->second[0];
             float h = boxsz->second[1];
 
+            using ms = std::chrono::duration<double, std::milli>;
+            auto now = std::chrono::high_resolution_clock::now;
+
             if (frame_count == 0) {
                 // === First frame processing ===
                 std::cout << nimg << std::endl;
                 frame_count += 1;
-                auto fstart = std::chrono::high_resolution_clock::now();
+                auto fstart = now();
                 int w_resize = static_cast<int>(w * (ROI_SIZE / IMG_WIDTH));
                 int h_resize = static_cast<int>(h * (ROI_SIZE / IMG_HEIGHT));
 
-                auto ftime1 = std::chrono::high_resolution_clock::now();
+                auto t_after_resize_wh = now();
                 cv::Mat resized_img;
                 cv::resize(img_curr_np, resized_img,
                            cv::Size(ROI_SIZE, ROI_SIZE), 0, 0, cv::INTER_AREA);
 
-                auto ftime2 = std::chrono::high_resolution_clock::now();
+                auto t_after_resize_img = now();
                 cv::Mat float_img;
                 resized_img.convertTo(float_img, CV_32F);
-                auto ftime3 = std::chrono::high_resolution_clock::now();
+                auto t_after_convert = now();
                 std::memcpy(img, float_img.ptr<float>(),
                             sizeof(float) * ROI_SIZE * ROI_SIZE);
-                auto ftime4 = std::chrono::high_resolution_clock::now();
+                auto t_after_memcpy = now();
 
-                // First TRT (TensorRT) inference, then prefetch x_max, y_max to CPU
+                // TRT
                 Grad_Response.context->enqueueV3(stream1);
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc, 0, stream1);
-                    cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc, 0, stream1);
-                }
+                cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
+                cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
                 cudaStreamSynchronize(stream1);
-                auto ftime5 = std::chrono::high_resolution_clock::now();
+                auto t_after_1st_trt = now();
 
                 // Prefix sum on x_max and y_max
                 for (int i = 1; i < ROI_SIZE; ++i) {
@@ -164,12 +168,12 @@ int main() {
                 for (int i = 1; i < ROI_SIZE; ++i) {
                     y_max[i] += y_max[i - 1];
                 }
-                auto ftime6 = std::chrono::high_resolution_clock::now();
+                auto t_after_cumsum = now();
 
                 // Shifted subtraction to find target location
                 tgt_xywh_curr =
                     shift_subtract(x_max, y_max, w_resize, h_resize);
-                auto ftime7 = std::chrono::high_resolution_clock::now();
+                auto t_after_shift_sub = now();
 
                 // Scale back to original image coordinates
                 tgt_xywh_curr[0] = static_cast<float>(
@@ -178,39 +182,33 @@ int main() {
                     std::round(tgt_xywh_curr[1] * (IMG_HEIGHT / ROI_SIZE)));
                 tgt_xywh_curr[2] = w;
                 tgt_xywh_curr[3] = h;
-                auto ftime8 = std::chrono::high_resolution_clock::now();
+                auto t_after_rescale = now();
 
                 // Extract ROI (Region of Interest) around target
                 std::tie(roi_tl_x, roi_tl_y) =
                     GetROI(roi, img_curr_np.ptr<uint8_t>(0), tgt_xywh_curr);
-                auto ftime9 = std::chrono::high_resolution_clock::now();
+                auto t_after_get_roi = now();
 
-                // Prefetch img to CPU (GPU read during enqueueV3 changes page state)
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(img, ROI_SIZE * ROI_SIZE * sizeof(float), loc, 0, stream1);
-                    cudaStreamSynchronize(stream1);
-                }
+                cudaMemPrefetchAsync(img, ROI_SIZE * ROI_SIZE * sizeof(float),
+                                     loc, 0, stream1);
+                cudaStreamSynchronize(stream1);
 
                 // Threshold to detect flame and convert to float
                 threshold(roi, flame_cover_mask, img, flame_signal_curr);
 
-                auto ftime10 = std::chrono::high_resolution_clock::now();
+                auto t_after_thresh = now();
 
                 // Second TRT inference on ROI, then prefetch response to CPU
                 Grad_Response.context->enqueueV3(stream1);
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(response, ROI_SIZE * ROI_SIZE * sizeof(float), loc, 0, stream1);
-                }
+                cudaMemPrefetchAsync(response,
+                                     ROI_SIZE * ROI_SIZE * sizeof(float), loc,
+                                     0, stream1);
                 cudaStreamSynchronize(stream1);
-                auto ftime11 = std::chrono::high_resolution_clock::now();
+                auto t_after_2nd_trt = now();
 
                 // Top-K keypoint extraction from response map
                 topk = topk_sorted_parallel(response);
-                auto ftime12 = std::chrono::high_resolution_clock::now();
+                auto t_after_topk = now();
 
                 int i = 0;
                 for (const auto &vi : topk) {
@@ -223,13 +221,13 @@ int main() {
                                     static_cast<float>(y + roi_tl_y)};
                     ++i;
                 }
-                auto ftime13 = std::chrono::high_resolution_clock::now();
+                auto t_after_kpts = now();
 
                 // Extract patches and compute ORB (Oriented FAST and Rotated
                 // BRIEF) descriptors
                 extract_all_patches(patches, img, kpts_for_patches);
                 dscrp_curr = extract_descriptors(patches);
-                auto ftime14 = std::chrono::high_resolution_clock::now();
+                auto t_after_dscrp = now();
 
                 // Pass state to next frame
                 tgt_xywh_last = tgt_xywh_curr;
@@ -240,74 +238,54 @@ int main() {
                 tgt_xywh_refined_last = tgt_xywh_curr;
                 kpts_refined_last = kpts_curr;
                 dscrp_refined_last = dscrp_curr;
-                auto fend = std::chrono::high_resolution_clock::now();
+                auto fend = now();
 
                 // === Debug timing output for first frame ===
-                std::chrono::duration<double, std::milli> fframe_time =
-                    fend - fstart;
-                std::chrono::duration<double, std::milli> ftime1_s =
-                    ftime1 - fstart;
-                std::chrono::duration<double, std::milli> ftime2_1 =
-                    ftime2 - ftime1;
-                std::chrono::duration<double, std::milli> ftime3_2 =
-                    ftime3 - ftime2;
-                std::chrono::duration<double, std::milli> ftime4_3 =
-                    ftime4 - ftime3;
-                std::chrono::duration<double, std::milli> ftime5_4 =
-                    ftime5 - ftime4;
-                std::chrono::duration<double, std::milli> ftime6_5 =
-                    ftime6 - ftime5;
-                std::chrono::duration<double, std::milli> ftime7_6 =
-                    ftime7 - ftime6;
-                std::chrono::duration<double, std::milli> ftime8_7 =
-                    ftime8 - ftime7;
-                std::chrono::duration<double, std::milli> ftime9_8 =
-                    ftime9 - ftime8;
-                std::chrono::duration<double, std::milli> ftime10_9 =
-                    ftime10 - ftime9;
-                std::chrono::duration<double, std::milli> ftime11_10 =
-                    ftime11 - ftime10;
-                std::chrono::duration<double, std::milli> ftime12_11 =
-                    ftime12 - ftime11;
-                std::chrono::duration<double, std::milli> ftime13_12 =
-                    ftime13 - ftime12;
-                std::chrono::duration<double, std::milli> ftime14_13 =
-                    ftime14 - ftime13;
-                std::chrono::duration<double, std::milli> ftimeend_14 =
-                    fend - ftime14;
-
+                ms fframe_time = fend - fstart;
                 std::cout << "First frame total time  : " << fframe_time.count()
                           << " ms\n";
-                std::cout << "Resize w/h              : " << ftime1_s.count()
+                std::cout << "  Resize w/h            : "
+                          << ms(t_after_resize_wh - fstart).count() << " ms\n";
+                std::cout << "  Resize image          : "
+                          << ms(t_after_resize_img - t_after_resize_wh).count()
                           << " ms\n";
-                std::cout << "Resize image (Mat)      : " << ftime2_1.count()
+                std::cout << "  Convert to float      : "
+                          << ms(t_after_convert - t_after_resize_img).count()
                           << " ms\n";
-                std::cout << "Convert to float (Mat)  : " << ftime3_2.count()
+                std::cout << "  Copy to unified mem   : "
+                          << ms(t_after_memcpy - t_after_convert).count()
                           << " ms\n";
-                std::cout << "Copy to unified mem(Mat): " << ftime4_3.count()
+                std::cout << "  1st TRT + sync        : "
+                          << ms(t_after_1st_trt - t_after_memcpy).count()
                           << " ms\n";
-                std::cout << "1st resp TRT            : " << ftime5_4.count()
+                std::cout << "  Cumsum                : "
+                          << ms(t_after_cumsum - t_after_1st_trt).count()
                           << " ms\n";
-                std::cout << "CUMSUM                  : " << ftime6_5.count()
+                std::cout << "  Shift subtraction     : "
+                          << ms(t_after_shift_sub - t_after_cumsum).count()
                           << " ms\n";
-                std::cout << "Shifted subtraction     : " << ftime7_6.count()
+                std::cout << "  Rescale to orig coords: "
+                          << ms(t_after_rescale - t_after_shift_sub).count()
                           << " ms\n";
-                std::cout << "Restore box to orig img : " << ftime8_7.count()
+                std::cout << "  GetROI                : "
+                          << ms(t_after_get_roi - t_after_rescale).count()
                           << " ms\n";
-                std::cout << "Get ROI                 : " << ftime9_8.count()
+                std::cout << "  Threshold + flame chk : "
+                          << ms(t_after_thresh - t_after_get_roi).count()
                           << " ms\n";
-                std::cout << "ROI operations          : " << ftime10_9.count()
+                std::cout << "  2nd TRT + sync        : "
+                          << ms(t_after_2nd_trt - t_after_thresh).count()
                           << " ms\n";
-                std::cout << "2nd resp TRT            : " << ftime11_10.count()
+                std::cout << "  TopK                  : "
+                          << ms(t_after_topk - t_after_2nd_trt).count()
                           << " ms\n";
-                std::cout << "TopK                    : " << ftime12_11.count()
+                std::cout << "  Get keypoints         : "
+                          << ms(t_after_kpts - t_after_topk).count() << " ms\n";
+                std::cout << "  Patches + descriptors : "
+                          << ms(t_after_dscrp - t_after_kpts).count()
                           << " ms\n";
-                std::cout << "Get keypoints           : " << ftime13_12.count()
-                          << " ms\n";
-                std::cout << "Patches/descriptors     : " << ftime14_13.count()
-                          << " ms\n";
-                std::cout << "Inter-frame param pass  : " << ftimeend_14.count()
-                          << " ms\n";
+                std::cout << "  State pass to next frm: "
+                          << ms(fend - t_after_dscrp).count() << " ms\n";
 
                 // Write annotated frame to video (not included in timing)
                 {
@@ -328,26 +306,15 @@ int main() {
                 // === Subsequent frame processing ===
                 std::cout << nimg << std::endl;
                 frame_count += 1;
-                auto start = std::chrono::high_resolution_clock::now();
-
-                // Extract ROI using last frame's target location
+                auto start = now();
                 std::tie(roi_tl_x, roi_tl_y) =
                     GetROI(roi, img_curr_np.ptr<uint8_t>(0), tgt_xywh_last);
-                auto time0_1 = std::chrono::high_resolution_clock::now();
 
-                // Prefetch img to CPU (GPU read during enqueueV3 changes page state)
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(img, ROI_SIZE * ROI_SIZE * sizeof(float), loc, 0, stream1);
-                    cudaStreamSynchronize(stream1);
-                }
+                auto t_after_roi = now();
 
                 // Threshold and convert ROI
                 threshold(roi, flame_cover_mask, img, flame_signal_curr);
-                auto time0_2 = std::chrono::high_resolution_clock::now();
-
-                auto time0_3 = std::chrono::high_resolution_clock::now();
+                auto t_after_thresh = now();
 
                 // If flame was present last frame but gone now, reset to
                 // first-frame mode
@@ -357,45 +324,36 @@ int main() {
                     continue;
                 }
 
-                auto time0 = std::chrono::high_resolution_clock::now();
-                auto time1_0 = std::chrono::high_resolution_clock::now();
-                auto time1 = std::chrono::high_resolution_clock::now();
-
                 // TRT inference on current ROI, then prefetch outputs to CPU
                 Grad_Response.context->enqueueV3(stream1);
-                {
-                    cudaMemLocation loc = {};
-                    loc.type = cudaMemLocationTypeHost;
-                    cudaMemPrefetchAsync(response, ROI_SIZE * ROI_SIZE * sizeof(float), loc, 0, stream1);
-                    cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc, 0, stream1);
-                    cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc, 0, stream1);
-                }
-                auto time2_0 = std::chrono::high_resolution_clock::now();
-                auto time2_1 = std::chrono::high_resolution_clock::now();
+                cudaMemPrefetchAsync(response,
+                                     ROI_SIZE * ROI_SIZE * sizeof(float), loc,
+                                     0, stream1);
+                cudaMemPrefetchAsync(x_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
+                cudaMemPrefetchAsync(y_max, ROI_SIZE * sizeof(float), loc, 0,
+                                     stream1);
+                cudaMemPrefetchAsync(img, ROI_SIZE * ROI_SIZE * sizeof(float),
+                                     loc, 0, stream1);
+
+                auto t_after_enqueue = now();
 
                 // Erode flame mask on CPU while GPU inference + prefetch run
-                cv::Mat flame_cover_mask_mat(ROI_SIZE, ROI_SIZE, CV_32F,
-                                             flame_cover_mask);
-                cv::erode(flame_cover_mask_mat, eroded_mask, kernel);
-                auto time2_2 = std::chrono::high_resolution_clock::now();
-                auto time2_3 = std::chrono::high_resolution_clock::now();
+                cv::erode(cv::Mat(ROI_SIZE, ROI_SIZE, CV_32F, flame_cover_mask),
+                          eroded_mask, kernel);
+                auto t_after_erode = now();
 
                 // Wait for inference + prefetch to complete
                 cudaStreamSynchronize(stream1);
-                auto time2 = std::chrono::high_resolution_clock::now();
-
-                auto time3_0 = std::chrono::high_resolution_clock::now();
-                auto time3_1 = std::chrono::high_resolution_clock::now();
+                auto t_after_sync = now();
 
                 // Apply mask to response (suppress flame and boundary regions)
                 multiply(response, eroded_mask.ptr<float>(), orb_response);
-
-                auto time3 = std::chrono::high_resolution_clock::now();
-                auto time4_0 = std::chrono::high_resolution_clock::now();
+                auto t_after_multiply = now();
 
                 // Top-K keypoint extraction from masked response
                 topk = topk_sorted_parallel(orb_response);
-                auto time4_1 = std::chrono::high_resolution_clock::now();
+                auto t_after_topk = now();
 
                 int i = 0;
                 for (const auto &vi : topk) {
@@ -408,20 +366,19 @@ int main() {
                                     static_cast<float>(y + roi_tl_y)};
                     ++i;
                 }
-                auto time4_2 = std::chrono::high_resolution_clock::now();
 
                 // Extract patches and compute descriptors
                 extract_all_patches(patches, img, kpts_for_patches);
-                auto time4_3 = std::chrono::high_resolution_clock::now();
+                auto t_after_patches = now();
                 dscrp_curr = extract_descriptors(patches);
-                auto time4_4 = std::chrono::high_resolution_clock::now();
+                auto t_after_dscrp = now();
 
                 // Match descriptors between consecutive frames
                 matches = match_descriptors(dscrp_last, dscrp_curr);
-                auto time4_5 = std::chrono::high_resolution_clock::now();
+                auto t_after_match1 = now();
                 matches_refined =
                     match_descriptors(dscrp_refined_last, dscrp_curr);
-                auto time4_6 = std::chrono::high_resolution_clock::now();
+                auto t_after_match2 = now();
 
                 // Prefix sum for cumulative response
                 for (int i = 1; i < ROI_SIZE; ++i) {
@@ -431,13 +388,11 @@ int main() {
                     y_max[i] += y_max[i - 1];
                 }
 
-                auto time4 = std::chrono::high_resolution_clock::now();
-
                 // Shifted subtraction for target localization
                 tgt_xywh_curr = shift_subtract(x_max, y_max, w, h);
+                auto t_after_cumsum = now();
 
                 // Post-processing: ORB-based correction path
-                auto time5 = std::chrono::high_resolution_clock::now();
                 kpts_result =
                     FilterKptsMode(matches, kpts_last, kpts_curr, dscrp_curr);
                 boxfil_result =
@@ -446,9 +401,9 @@ int main() {
                 OrbMatch_result = MatchKptsCorrect(
                     boxfil_result.kp1_boxfiltered,
                     boxfil_result.kp2_boxfiltered, tgt_xywh_last);
+                auto t_after_orb = now();
 
                 // Post-processing: similar triangle correction path
-                auto time6 = std::chrono::high_resolution_clock::now();
                 kpts_result = FilterKpts(matches_refined, kpts_refined_last,
                                          kpts_curr, dscrp_curr);
                 boxfil_result =
@@ -456,9 +411,7 @@ int main() {
                                 kpts_result.dst_dscrp, tgt_xywh_last);
                 smitri_check = CheckSmiTri(boxfil_result.kp1_boxfiltered,
                                            boxfil_result.kp2_boxfiltered);
-
-                auto time7 = std::chrono::high_resolution_clock::now();
-                auto time8 = std::chrono::high_resolution_clock::now();
+                auto t_after_smitri_check = now();
                 if (smitri_check.apply) {
                     // Convert to double precision for similar triangle
                     // computation
@@ -524,145 +477,53 @@ int main() {
                     dscrp_last = dscrp_curr;
                     flame_signal_last = flame_signal_curr;
                 }
-                auto end = std::chrono::high_resolution_clock::now();
+                auto end = now();
 
                 // === Debug timing output for subsequent frames ===
-                std::chrono::duration<double, std::milli> whole_time =
-                    end - start;
-                std::chrono::duration<double, std::milli> time_0start =
-                    time0 - start;
-                std::chrono::duration<double, std::milli> time_01_start =
-                    time0_1 - start;
-                std::chrono::duration<double, std::milli> time_02_01 =
-                    time0_2 - time0_1;
-                std::chrono::duration<double, std::milli> time_03_02 =
-                    time0_3 - time0_2;
-                std::chrono::duration<double, std::milli> time_0_03 =
-                    time0 - time0_3;
-
-                std::chrono::duration<double, std::milli> time_10 =
-                    time1 - time0;
-                std::chrono::duration<double, std::milli> time_10_0 =
-                    time1_0 - time0;
-                std::chrono::duration<double, std::milli> time_1_10 =
-                    time1 - time1_0;
-
-                std::chrono::duration<double, std::milli> time_21 =
-                    time2 - time1;
-                std::chrono::duration<double, std::milli> time_20_1 =
-                    time2_0 - time1;
-                std::chrono::duration<double, std::milli> time_21_20 =
-                    time2_1 - time2_0;
-                std::chrono::duration<double, std::milli> time_22_21 =
-                    time2_2 - time2_1;
-                std::chrono::duration<double, std::milli> time_23_22 =
-                    time2_3 - time2_2;
-                std::chrono::duration<double, std::milli> time_2_23 =
-                    time2 - time2_3;
-
-                std::chrono::duration<double, std::milli> time_32 =
-                    time3 - time2;
-                std::chrono::duration<double, std::milli> time_30_2 =
-                    time3_0 - time2;
-                std::chrono::duration<double, std::milli> time_31_30 =
-                    time3_1 - time3_0;
-                std::chrono::duration<double, std::milli> time_3_31 =
-                    time3 - time3_1;
-
-                std::chrono::duration<double, std::milli> time_43 =
-                    time4 - time3;
-                std::chrono::duration<double, std::milli> time_40_3 =
-                    time4_0 - time3;
-                std::chrono::duration<double, std::milli> time_41_40 =
-                    time4_1 - time4_0;
-                std::chrono::duration<double, std::milli> time_42_41 =
-                    time4_2 - time4_1;
-                std::chrono::duration<double, std::milli> time_43_42 =
-                    time4_3 - time4_2;
-                std::chrono::duration<double, std::milli> time_44_43 =
-                    time4_4 - time4_3;
-                std::chrono::duration<double, std::milli> time_45_44 =
-                    time4_5 - time4_4;
-                std::chrono::duration<double, std::milli> time_46_45 =
-                    time4_6 - time4_5;
-                std::chrono::duration<double, std::milli> time_4_46 =
-                    time4 - time4_6;
-
-                std::chrono::duration<double, std::milli> time_54 =
-                    time5 - time4;
-                std::chrono::duration<double, std::milli> time_65 =
-                    time6 - time5;
-                std::chrono::duration<double, std::milli> time_76 =
-                    time7 - time6;
-                std::chrono::duration<double, std::milli> time_87 =
-                    time8 - time7;
-                std::chrono::duration<double, std::milli> time_end8 =
-                    end - time8;
-
-                std::cout << "RUN time: " << whole_time.count() << " ms\n";
-                std::cout << "Get ROI -> lost check   : " << time_0start.count()
+                std::cout << "RUN time: " << ms(end - start).count() << " ms\n";
+                std::cout << "  GetROI                : "
+                          << ms(t_after_roi - start).count() << " ms\n";
+                std::cout << "  Threshold + flame chk : "
+                          << ms(t_after_thresh - t_after_roi).count()
                           << " ms\n";
-                std::cout << "      Get ROI           : "
-                          << time_01_start.count() << " ms\n";
-                std::cout << "      Threshold binarize: " << time_02_01.count()
+                std::cout << "  TRT enqueue + prefetch: "
+                          << ms(t_after_enqueue - t_after_thresh).count()
                           << " ms\n";
-                std::cout << "      Check for flame   : " << time_03_02.count()
+                std::cout << "  Erode mask (CPU||GPU) : "
+                          << ms(t_after_erode - t_after_enqueue).count()
                           << " ms\n";
-                std::cout << "      Branch statement  : " << time_0_03.count()
+                std::cout << "  CUDA sync             : "
+                          << ms(t_after_sync - t_after_erode).count()
                           << " ms\n";
-
-                std::cout << "Normalize -> TRT input  : " << time_10.count()
+                std::cout << "  Multiply resp * mask  : "
+                          << ms(t_after_multiply - t_after_sync).count()
                           << " ms\n";
-                std::cout << "      Normalize         : " << time_10_0.count()
+                std::cout << "  TopK                  : "
+                          << ms(t_after_topk - t_after_multiply).count()
                           << " ms\n";
-                std::cout << "      Memory copy       : " << time_1_10.count()
+                std::cout << "  Extract patches       : "
+                          << ms(t_after_patches - t_after_topk).count()
                           << " ms\n";
-
-                std::cout << "Resp TRT || erode mask  : " << time_21.count()
+                std::cout << "  Extract descriptors   : "
+                          << ms(t_after_dscrp - t_after_patches).count()
                           << " ms\n";
-                std::cout << "      Resp TRT run      : " << time_20_1.count()
+                std::cout << "  Match descriptors 1   : "
+                          << ms(t_after_match1 - t_after_dscrp).count()
                           << " ms\n";
-                std::cout << "      Mask to fp        : " << time_21_20.count()
+                std::cout << "  Match descriptors 2   : "
+                          << ms(t_after_match2 - t_after_match1).count()
                           << " ms\n";
-                std::cout << "      Erode mask        : " << time_22_21.count()
+                std::cout << "  Cumsum + shift sub    : "
+                          << ms(t_after_cumsum - t_after_match2).count()
                           << " ms\n";
-                std::cout << "      Invert mask       : " << time_23_22.count()
+                std::cout << "  ORB post-process      : "
+                          << ms(t_after_orb - t_after_cumsum).count()
                           << " ms\n";
-                std::cout << "      CUDA sync         : " << time_2_23.count()
+                std::cout << "  SmiTri check          : "
+                          << ms(t_after_smitri_check - t_after_orb).count()
                           << " ms\n";
-
-                std::cout << "Get TRT output->mask    : " << time_32.count()
-                          << " ms\n";
-                std::cout << "      Ptr get TRT output: " << time_30_2.count()
-                          << " ms\n";
-                std::cout << "      Data to mat       : " << time_31_30.count()
-                          << " ms\n";
-                std::cout << "      Mat * mask        : " << time_3_31.count()
-                          << " ms\n";
-
-                std::cout << "Cum TRT || TPDM         : " << time_43.count()
-                          << " ms\n";
-                std::cout << "      TopK              : " << time_41_40.count()
-                          << " ms\n";
-                std::cout << "      Descriptor        : " << time_44_43.count()
-                          << " ms\n";
-                std::cout << "      Match1            : " << time_45_44.count()
-                          << " ms\n";
-                std::cout << "      Match2            : " << time_46_45.count()
-                          << " ms\n";
-                std::cout << "      Cumsum            : " << time_4_46.count()
-                          << " ms\n";
-
-                std::cout << "Shifted subtraction     : " << time_54.count()
-                          << " ms\n";
-                std::cout << "ORB post-process        : " << time_65.count()
-                          << " ms\n";
-                std::cout << "SmiTri decision         : " << time_76.count()
-                          << " ms\n";
-                std::cout << "Prepare double precision: " << time_87.count()
-                          << " ms\n";
-                std::cout << "SmiTri select output    : " << time_end8.count()
-                          << " ms\n";
+                std::cout << "  SmiTri apply + output : "
+                          << ms(end - t_after_smitri_check).count() << " ms\n";
                 std::cout << "\n";
 
                 // Write annotated frame to video (not included in timing)

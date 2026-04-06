@@ -4,7 +4,7 @@
 #include <cstring>
 #include <tuple>
 
-#include "../types.h"
+#include "types.h"
 
 // Extract ROI region from raw uint8 pointer into pre-allocated contiguous buffer.
 inline std::tuple<int, int> GetROI(uint8_t* roi_ptr, const uint8_t* img_ptr,
