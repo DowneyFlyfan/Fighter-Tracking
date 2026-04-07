@@ -119,10 +119,34 @@ int main() {
         cv::Size(static_cast<int>(IMG_WIDTH), static_cast<int>(IMG_HEIGHT)));
 
     {
-        for (const auto &entry : sorted_entries) {
-            std::string nimg = entry.path().stem().string();
-            std::string img_path = entry.path().string();
-            cv::Mat img_curr_np = cv::imread(img_path, cv::IMREAD_GRAYSCALE);
+        // Double-buffered image prefetch: while GPU runs frame N's TRT, CPU
+        // reads frame N+1 from disk
+        cv::Mat img_curr_np, img_next_np;
+        std::string nimg, nimg_next;
+        if (!sorted_entries.empty()) {
+            img_curr_np = cv::imread(sorted_entries.front().path().string(),
+                                     cv::IMREAD_GRAYSCALE);
+            nimg = sorted_entries.front().path().stem().string();
+        }
+        for (auto it = sorted_entries.begin(); it != sorted_entries.end();
+             ++it) {
+            auto next_it = std::next(it);
+            bool has_next = (next_it != sorted_entries.end());
+
+            // Buffer swap: if previous iteration prefetched the next image,
+            // promote it to current. Otherwise (first iter or post-continue),
+            // synchronously read.
+            if (it != sorted_entries.begin()) {
+                if (!img_next_np.empty()) {
+                    img_curr_np = std::move(img_next_np);
+                    nimg = std::move(nimg_next);
+                    img_next_np.release();
+                } else {
+                    img_curr_np =
+                        cv::imread(it->path().string(), cv::IMREAD_GRAYSCALE);
+                    nimg = it->path().stem().string();
+                }
+            }
             auto boxsz = BOXsz_dict.find(nimg);
 
             float w = boxsz->second[0];
@@ -203,6 +227,17 @@ int main() {
                 cudaMemPrefetchAsync(response,
                                      ROI_SIZE * ROI_SIZE * sizeof(float), loc,
                                      0, stream1);
+                // Overlap: read next frame from disk while GPU runs 2nd TRT
+                // (excluded from pipeline timing — measured separately)
+                double imread_next_ms = 0.0;
+                if (has_next) {
+                    auto t_imread0 = now();
+                    img_next_np =
+                        cv::imread(next_it->path().string(),
+                                   cv::IMREAD_GRAYSCALE);
+                    nimg_next = next_it->path().stem().string();
+                    imread_next_ms = ms(now() - t_imread0).count();
+                }
                 cudaStreamSynchronize(stream1);
                 auto t_after_2nd_trt = now();
 
@@ -241,9 +276,12 @@ int main() {
                 auto fend = now();
 
                 // === Debug timing output for first frame ===
+                // Subtract imread_next_ms: imread of next frame is overlapped
+                // with GPU but should not count toward this frame
                 ms fframe_time = fend - fstart;
-                std::cout << "First frame total time  : " << fframe_time.count()
-                          << " ms\n";
+                std::cout << "First frame total time  : "
+                          << (fframe_time.count() - imread_next_ms)
+                          << " ms (imread next: " << imread_next_ms << " ms)\n";
                 std::cout << "  Resize w/h            : "
                           << ms(t_after_resize_wh - fstart).count() << " ms\n";
                 std::cout << "  Resize image          : "
@@ -274,7 +312,8 @@ int main() {
                           << ms(t_after_thresh - t_after_get_roi).count()
                           << " ms\n";
                 std::cout << "  2nd TRT + sync        : "
-                          << ms(t_after_2nd_trt - t_after_thresh).count()
+                          << (ms(t_after_2nd_trt - t_after_thresh).count() -
+                              imread_next_ms)
                           << " ms\n";
                 std::cout << "  TopK                  : "
                           << ms(t_after_topk - t_after_2nd_trt).count()
@@ -342,6 +381,18 @@ int main() {
                 cv::erode(cv::Mat(ROI_SIZE, ROI_SIZE, CV_32F, flame_cover_mask),
                           eroded_mask, kernel);
                 auto t_after_erode = now();
+
+                // Read next frame from disk during GPU window (excluded from
+                // pipeline timing — measured separately)
+                double imread_next_ms = 0.0;
+                if (has_next) {
+                    auto t_imread0 = now();
+                    img_next_np =
+                        cv::imread(next_it->path().string(),
+                                   cv::IMREAD_GRAYSCALE);
+                    nimg_next = next_it->path().stem().string();
+                    imread_next_ms = ms(now() - t_imread0).count();
+                }
 
                 // Wait for inference + prefetch to complete
                 cudaStreamSynchronize(stream1);
@@ -480,7 +531,11 @@ int main() {
                 auto end = now();
 
                 // === Debug timing output for subsequent frames ===
-                std::cout << "RUN time: " << ms(end - start).count() << " ms\n";
+                // Subtract imread_next_ms: imread of next frame is overlapped
+                // with GPU but should not count toward this frame's RUN time
+                std::cout << "RUN time: "
+                          << (ms(end - start).count() - imread_next_ms)
+                          << " ms (imread next: " << imread_next_ms << " ms)\n";
                 std::cout << "  GetROI                : "
                           << ms(t_after_roi - start).count() << " ms\n";
                 std::cout << "  Threshold + flame chk : "
@@ -493,7 +548,8 @@ int main() {
                           << ms(t_after_erode - t_after_enqueue).count()
                           << " ms\n";
                 std::cout << "  CUDA sync             : "
-                          << ms(t_after_sync - t_after_erode).count()
+                          << (ms(t_after_sync - t_after_erode).count() -
+                              imread_next_ms)
                           << " ms\n";
                 std::cout << "  Multiply resp * mask  : "
                           << ms(t_after_multiply - t_after_sync).count()

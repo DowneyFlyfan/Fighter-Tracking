@@ -119,10 +119,33 @@ int main() {
         cv::Size(static_cast<int>(IMG_WIDTH), static_cast<int>(IMG_HEIGHT)));
 
     {
-        for (const auto &entry : sorted_entries) {
-            std::string nimg = entry.path().stem().string();
-            std::string img_path = entry.path().string();
-            cv::Mat img_curr_np = cv::imread(img_path, cv::IMREAD_GRAYSCALE);
+        // Double-buffered image prefetch: while GPU runs frame N's TRT, CPU
+        // reads frame N+1 from disk
+        cv::Mat img_curr_np, img_next_np;
+        std::string nimg, nimg_next;
+        if (!sorted_entries.empty()) {
+            img_curr_np = cv::imread(sorted_entries.front().path().string(),
+                                     cv::IMREAD_GRAYSCALE);
+            nimg = sorted_entries.front().path().stem().string();
+        }
+        for (auto it = sorted_entries.begin(); it != sorted_entries.end();
+             ++it) {
+            auto next_it = std::next(it);
+            bool has_next = (next_it != sorted_entries.end());
+
+            // Buffer swap: if previous iteration prefetched the next image,
+            // promote it. Otherwise (first iter or post-continue), read sync.
+            if (it != sorted_entries.begin()) {
+                if (!img_next_np.empty()) {
+                    img_curr_np = std::move(img_next_np);
+                    nimg = std::move(nimg_next);
+                    img_next_np.release();
+                } else {
+                    img_curr_np =
+                        cv::imread(it->path().string(), cv::IMREAD_GRAYSCALE);
+                    nimg = it->path().stem().string();
+                }
+            }
             auto boxsz = BOXsz_dict.find(nimg);
 
             float w = boxsz->second[0];
@@ -189,6 +212,13 @@ int main() {
                 cudaMemPrefetchAsync(response,
                                      ROI_SIZE * ROI_SIZE * sizeof(float), loc,
                                      0, stream1);
+                // Overlap: read next frame from disk while GPU runs 2nd TRT
+                if (has_next) {
+                    img_next_np =
+                        cv::imread(next_it->path().string(),
+                                   cv::IMREAD_GRAYSCALE);
+                    nimg_next = next_it->path().stem().string();
+                }
                 cudaStreamSynchronize(stream1);
 
                 // Top-K keypoint extraction from response map
@@ -279,6 +309,12 @@ int main() {
                 cv::Mat flame_cover_mask_mat(ROI_SIZE, ROI_SIZE, CV_32F,
                                              flame_cover_mask);
                 cv::erode(flame_cover_mask_mat, eroded_mask, kernel);
+                if (has_next) {
+                    img_next_np =
+                        cv::imread(next_it->path().string(),
+                                   cv::IMREAD_GRAYSCALE);
+                    nimg_next = next_it->path().stem().string();
+                }
 
                 // Wait for inference + prefetch to complete
                 cudaStreamSynchronize(stream1);
