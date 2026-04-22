@@ -103,6 +103,11 @@ int main() {
     bool flame_signal_curr = true;
     bool flame_signal_last = false;
 
+    // Only the very first invocation of the frame-0 branch reads from
+    // BOXsz_dict. A later fallback (target lost → frame_count = 0) reuses
+    // tgt_xywh_last[2,3], which still holds the last valid tracked size.
+    bool first_init = true;
+
     uint8_t *roi = new uint8_t[ROI_SIZE * ROI_SIZE];
     float *flame_cover_mask = new float[ROI_SIZE * ROI_SIZE];
     float *orb_response = new float[ROI_SIZE * ROI_SIZE];
@@ -147,16 +152,27 @@ int main() {
                     nimg = it->path().stem().string();
                 }
             }
-            auto boxsz = BOXsz_dict.find(nimg);
-
-            float w = boxsz->second[0];
-            float h = boxsz->second[1];
-
             using ms = std::chrono::duration<double, std::milli>;
             auto now = std::chrono::high_resolution_clock::now;
 
             if (frame_count == 0) {
-                // === First frame processing ===
+                // === First frame processing (also used as the fallback
+                // re-init path when the target is lost) ===
+                // On the very first invocation we read the box size from
+                // BOXsz_dict. On any later fallback we reuse the last
+                // tracked size in tgt_xywh_last, so per-frame dictionary
+                // lookups are not needed.
+                float w, h;
+                if (first_init) {
+                    auto boxsz = BOXsz_dict.find(nimg);
+                    w = boxsz->second[0];
+                    h = boxsz->second[1];
+                    first_init = false;
+                } else {
+                    w = tgt_xywh_last[2];
+                    h = tgt_xywh_last[3];
+                }
+
                 std::cout << nimg << std::endl;
                 frame_count += 1;
                 auto fstart = now();
@@ -439,8 +455,11 @@ int main() {
                     y_max[i] += y_max[i - 1];
                 }
 
-                // Shifted subtraction for target localization
-                tgt_xywh_curr = shift_subtract(x_max, y_max, w, h);
+                // Shifted subtraction for target localization.
+                // Use the running box size from tgt_xywh_last (updated by
+                // post-processing) instead of a per-frame dictionary lookup.
+                tgt_xywh_curr = shift_subtract(x_max, y_max, tgt_xywh_last[2],
+                                               tgt_xywh_last[3]);
                 auto t_after_cumsum = now();
 
                 // Post-processing: ORB-based correction path
