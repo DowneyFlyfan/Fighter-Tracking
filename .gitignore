@@ -1,2 +1,14 @@
-Datasets/others
+Datasets/
 CLAUDE.md
+*.engine
+*.onnx
+*.onnx.data
+*.pt
+tools/teacher_embeddings.pt
+tools/student_convnext_atto_mr2.pt
+engine_model/timing.cache*
+output.mp4
+main
+main_debug
+__pycache__/
+*.pyc

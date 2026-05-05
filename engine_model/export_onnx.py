@@ -1,15 +1,20 @@
 """
-Export the NormFrangiNoSqrt vesselness module to ONNX and compare
-against the existing .onnx file.
+Export the Hessian-DoH (Determinant-of-Hessian) blob detector to ONNX.
 
 Pipeline:
   1. Normalize input by dividing by 255
   2. Hessian (Dxx, Dxy, Dyy) via grouped conv directly on normalized image
-  3. No-sqrt vesselness: disc = ReLU(trace² - 4*det), response = ReLU((|a|+|b|)*(a-b))
+  3. DoH (Determinant of Hessian): response = ReLU(Dxx*Dyy - Dxy^2)
+     - Bright/dark blob centers have Dxx, Dyy large same-sign and Dxy ~= 0
+       so det(H) is large positive (perfect blob detector — what SURF uses).
+     - Edges and saddles have det(H) ~= 0 or negative -> suppressed.
+     - Replaces the previous Frangi-style "no-sqrt vesselness" formula
+       which suppressed isotropic blobs because of the (lambda_max-lambda_min)
+       term — wrong for tracking a single bright drone target.
   4. Apply 10-pixel binary border mask
   5. Outputs: response [1,1,H,W], x_max [W] (max along rows), y_max [H] (max along cols)
 
-Hardware operations: conv, mul, abs, ReLU only (no sqrt/exp).
+Hardware operations: conv, mul, sub, ReLU only (no sqrt/abs/exp).
 """
 
 import torch
@@ -17,28 +22,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class NormFrangiNoSqrtMaskedMax(nn.Module):
+class NormHessianDoHMaskedMax(nn.Module):
     """
-    Hardware-friendly Frangi vesselness for target tracking (no sqrt).
-
-    Uses trace²-4*det discriminant (standard characteristic polynomial
-    discriminant = (λ1-λ2)²) instead of trace²-4*det².
-    Fixed input size 480x480.
+    Determinant-of-Hessian blob detector for tracking a single bright drone.
+    Fixed input size 256x256.
 
     Pipeline:
       1. image / 255.0
-      2. Hessian (Dxx, Dxy, Dyy) via grouped conv directly on normalized image
-      3. No-sqrt vesselness: disc = ReLU(trace² - 4*det)
+      2. Hessian (Dxx, Dxy, Dyy) via single 3-channel grouped conv
+      3. DoH: response = ReLU(Dxx*Dyy - Dxy^2)
       4. Apply 10-pixel binary border mask
       5. Per-axis max projection
     """
 
-    H = 480
-    W = 480
-    RESP_BORDER = 10  # border pixels zeroed on response
-
-    def __init__(self):
+    def __init__(self, height=256, width=256, border_mask_size=10):
         super().__init__()
+        self.height = height
+        self.width = width
+        self.border_mask_size = border_mask_size
 
         # Second-order Gaussian derivative kernels [3, 1, 7, 7]
         # Channel 0: g_xx, Channel 1: g_xy, Channel 2: g_yy
@@ -248,8 +249,8 @@ class NormFrangiNoSqrtMaskedMax(nn.Module):
         self.response_conv.weight = nn.Parameter(response_weight, requires_grad=False)
 
         # 10-pixel binary border mask for response [1, H, W]
-        resp_mask = torch.zeros(1, self.H, self.W)
-        b = self.RESP_BORDER
+        resp_mask = torch.zeros(1, self.height, self.width)
+        b = self.border_mask_size
         resp_mask[:, b:-b, b:-b] = 1.0
         self.register_buffer("resp_mask", resp_mask)
 
@@ -257,41 +258,36 @@ class NormFrangiNoSqrtMaskedMax(nn.Module):
         # -- Step 1: Normalize to [0, 1] --
         x = image_clone / 255.0
 
-        # -- Step 2: Hessian via grouped conv --
+        # -- Step 2: Hessian via 3-channel grouped conv --
         x_3c = torch.cat((x, x, x), dim=1)
         hessian = self.response_conv(x_3c)  # [1, 3, H, W]
         dxx = hessian[:, 0:1, :, :]
         dxy = hessian[:, 1:2, :, :]
         dyy = hessian[:, 2:3, :, :]
 
-        # -- Step 3: No-sqrt vesselness (trace²-4*det) --
-        trace = dxx + dyy
-        det = dxx * dyy - dxy * dxy
-
-        trace_sq = trace * trace
-        discriminant = F.relu(trace_sq - 4.0 * det)
-
-        a = trace + discriminant
-        b = trace - discriminant
-
-        response = F.relu((torch.abs(a) + torch.abs(b)) * (a - b))
+        # -- Step 3: Determinant of Hessian (blob detector) --
+        # det(H) = Dxx*Dyy - Dxy^2
+        # Bright blob center: Dxx, Dyy < 0, Dxy ~= 0  ->  det > 0  (kept)
+        # Dark blob center : Dxx, Dyy > 0, Dxy ~= 0   ->  det > 0  (kept)
+        # Edge / saddle    : sign mixed or one ~= 0    ->  det <= 0 (clipped)
+        response = F.relu(dxx * dyy - dxy * dxy)
 
         # -- Step 4: Apply 10-pixel border mask --
         response = response * self.resp_mask
 
         # -- Step 5: Per-axis max projection --
-        resp_2d = response.view(self.H, self.W)  # [H, W]
+        resp_2d = response.view(self.height, self.width)  # [H, W]
         x_max = resp_2d.max(dim=0).values  # [W]
         y_max = resp_2d.max(dim=1).values  # [H]
 
         return response, x_max, y_max
 
 
-def export_onnx(output_path: str = "Norm_Frangi_NoSqrt_480.onnx"):
-    model = NormFrangiNoSqrtMaskedMax()
+def export_onnx(output_path: str = "Norm_Hessian_DoH_256.onnx"):
+    model = NormHessianDoHMaskedMax()
     model.eval()
 
-    dummy_input = torch.randn(1, 1, 480, 480)
+    dummy_input = torch.randn(1, 1, 256, 256)
 
     torch.onnx.export(
         model,
@@ -306,53 +302,5 @@ def export_onnx(output_path: str = "Norm_Frangi_NoSqrt_480.onnx"):
     print(f"Exported to {output_path}")
 
 
-def compare_models(original_path: str, new_path: str):
-    """Run both ONNX models on the same input and compare outputs."""
-    import numpy as np
-
-    try:
-        import onnxruntime as ort
-    except ImportError:
-        print("onnxruntime not installed. Install with: pip install onnxruntime")
-        return
-
-    # Create reproducible test input
-    np.random.seed(42)
-    test_input = np.random.rand(1, 1, 480, 480).astype(np.float32) * 255
-
-    sess_orig = ort.InferenceSession(original_path)
-    sess_new = ort.InferenceSession(new_path)
-
-    out_orig = sess_orig.run(None, {"image_clone": test_input})
-    out_new = sess_new.run(None, {"image_clone": test_input})
-
-    names = ["response", "x_max", "y_max"]
-    for i, name in enumerate(names):
-        o = out_orig[i]
-        n = out_new[i]
-        max_diff = np.max(np.abs(o - n))
-        mean_diff = np.mean(np.abs(o - n))
-        cos_sim = np.dot(o.flatten(), n.flatten()) / (
-            np.linalg.norm(o.flatten()) * np.linalg.norm(n.flatten()) + 1e-8
-        )
-        print(f"[{name}] shape_orig={o.shape} shape_new={n.shape}")
-        print(
-            f"  max_diff={max_diff:.6e}  mean_diff={mean_diff:.6e}  cos_sim={cos_sim:.6f}"
-        )
-        print(f"  orig range=[{o.min():.4f}, {o.max():.4f}]")
-        print(f"  new  range=[{n.min():.4f}, {n.max():.4f}]")
-        print()
-
-
 if __name__ == "__main__":
-    import sys
-
-    nosqrt_path = "Norm_Frangi_NoSqrt_480.onnx"
-    original_path = (
-        "/home/downeyflyfan/Research_Projects/Track/CPP-Track/"
-        "hspeedtrack_x86/onnx2trt/Norm_Grad_Response_Masked_Max_480.onnx"
-    )
-
-    export_onnx(nosqrt_path)
-    print("\n=== Original (det²) vs NormFrangiNoSqrt (det, no sqrt) ===")
-    compare_models(original_path, nosqrt_path)
+    export_onnx("Norm_Hessian_DoH_256.onnx")

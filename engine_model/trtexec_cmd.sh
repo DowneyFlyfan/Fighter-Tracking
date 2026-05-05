@@ -1,6 +1,6 @@
 trtexec \
-    --onnx=./Norm_Frangi_NoSqrt_480.onnx \
-    --saveEngine=./Norm_Frangi_NoSqrt_480.engine \
+    --onnx=./Norm_Hessian_DoH_256.onnx \
+    --saveEngine=./Norm_Hessian_DoH_256.engine \
     --fp16 \
     --builderOptimizationLevel=5 \
     --tilingOptimizationLevel=3 \

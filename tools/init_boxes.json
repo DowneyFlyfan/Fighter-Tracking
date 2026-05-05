@@ -1,0 +1,290 @@
+{
+  "test1": {
+    "box": [
+      305,
+      267,
+      56,
+      38
+    ],
+    "score": 0.5848982930183411,
+    "label": "bright dot"
+  },
+  "test2": {
+    "box": [
+      337,
+      269,
+      67,
+      42
+    ],
+    "score": 0.6365707516670227,
+    "label": "bright dot"
+  },
+  "test3": {
+    "box": [
+      315,
+      263,
+      55,
+      40
+    ],
+    "score": 0.6609874963760376,
+    "label": "bright dot"
+  },
+  "test4": {
+    "box": [
+      476,
+      245,
+      45,
+      35
+    ],
+    "score": 0.4541650712490082,
+    "label": "bright dot"
+  },
+  "test5": {
+    "box": [
+      162,
+      298,
+      48,
+      32
+    ],
+    "score": 0.5326369404792786,
+    "label": "bright dot"
+  },
+  "test6": {
+    "box": [
+      375,
+      270,
+      51,
+      33
+    ],
+    "score": 0.4687997102737427,
+    "label": "bright dot"
+  },
+  "test7": {
+    "box": [
+      261,
+      205,
+      28,
+      22
+    ],
+    "score": 0.46150803565979004,
+    "label": "bright dot"
+  },
+  "test8": {
+    "box": [
+      142,
+      0,
+      108,
+      16
+    ],
+    "score": 0.20645847916603088,
+    "label": "small"
+  },
+  "test9": {
+    "box": [
+      293,
+      285,
+      44,
+      32
+    ],
+    "score": 0.4949077367782593,
+    "label": "small aircraft bright dot small"
+  },
+  "test10": {
+    "box": [
+      136,
+      261,
+      42,
+      32
+    ],
+    "score": 0.6297159194946289,
+    "label": "bright dot"
+  },
+  "test11": {
+    "box": [
+      295,
+      268,
+      44,
+      33
+    ],
+    "score": 0.613250732421875,
+    "label": "bright dot"
+  },
+  "test12": {
+    "box": [
+      216,
+      56,
+      38,
+      36
+    ],
+    "score": 0.6314193606376648,
+    "label": "bright dot"
+  },
+  "test13": {
+    "box": [
+      269,
+      275,
+      48,
+      32
+    ],
+    "score": 0.5991007089614868,
+    "label": "bright dot"
+  },
+  "test14": {
+    "box": [
+      333,
+      261,
+      46,
+      31
+    ],
+    "score": 0.6196863055229187,
+    "label": "bright dot"
+  },
+  "test15": {
+    "box": [
+      370,
+      288,
+      47,
+      32
+    ],
+    "score": 0.6046341061592102,
+    "label": "bright dot"
+  },
+  "test16": {
+    "box": [
+      74,
+      251,
+      46,
+      31
+    ],
+    "score": 0.5955564379692078,
+    "label": "bright dot"
+  },
+  "test17": {
+    "box": [
+      376,
+      358,
+      30,
+      22
+    ],
+    "score": 0.4215444028377533,
+    "label": "small aircraft bright dot small bright object"
+  },
+  "test18": {
+    "box": [
+      148,
+      293,
+      78,
+      32
+    ],
+    "score": 0.4851192235946655,
+    "label": "bright dot"
+  },
+  "test19": {
+    "box": [
+      233,
+      288,
+      77,
+      30
+    ],
+    "score": 0.43950486183166504,
+    "label": "bright dot"
+  },
+  "test20": {
+    "box": [
+      318,
+      335,
+      75,
+      26
+    ],
+    "score": 0.4211801588535309,
+    "label": "aircraft bright dot small"
+  },
+  "test21": {
+    "box": [
+      288,
+      385,
+      73,
+      23
+    ],
+    "score": 0.46290749311447144,
+    "label": "bright dot"
+  },
+  "test22": {
+    "box": [
+      355,
+      316,
+      69,
+      24
+    ],
+    "score": 0.44211775064468384,
+    "label": "bright dot"
+  },
+  "test23": {
+    "box": [
+      265,
+      314,
+      63,
+      23
+    ],
+    "score": 0.44236424565315247,
+    "label": "small aircraft bright dot"
+  },
+  "test24": {
+    "box": [
+      350,
+      310,
+      50,
+      20
+    ],
+    "score": 0.5871857404708862,
+    "label": "bright dot"
+  },
+  "test25": {
+    "box": [
+      286,
+      97,
+      66,
+      27
+    ],
+    "score": 0.4236713647842407,
+    "label": "bright dot"
+  },
+  "test26": {
+    "box": [
+      388,
+      180,
+      66,
+      48
+    ],
+    "score": 0.45671147108078003,
+    "label": "bright dot"
+  },
+  "test27": {
+    "box": [
+      297,
+      264,
+      67,
+      43
+    ],
+    "score": 0.519952118396759,
+    "label": "bright dot"
+  },
+  "interference2": {
+    "box": [
+      436,
+      296,
+      55,
+      40
+    ],
+    "score": 1.0,
+    "label": "gt_init"
+  },
+  "interference6": {
+    "box": [
+      224,
+      302,
+      32,
+      22
+    ]
+  }
+}
