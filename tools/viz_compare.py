@@ -1,23 +1,37 @@
-"""Run ./main on a video, overlay BOTH predicted box (green) and
+"""Run a tracker on a video, overlay BOTH predicted box (green) and
 ground-truth box (red) on each frame, write to /tmp/viz_<name>.mp4.
 
 Also annotates frame index + center error so you can scrub to bad
-frames quickly."""
-import json, re, subprocess, sys
+frames quickly.
+
+Default tracker is ./main. Override with --cmd \"<tracker cmd>\" and
+optional --tag to suffix the output filename."""
+import json, re, shlex, subprocess, sys
 from pathlib import Path
 import cv2
 
-if len(sys.argv) < 2:
-    print("usage: viz_compare.py <video_dir>")
+argv = sys.argv[1:]
+cmd = ["./main"]
+tag = ""
+if "--cmd" in argv:
+    i = argv.index("--cmd")
+    cmd = shlex.split(argv[i + 1])
+    argv = argv[:i] + argv[i + 2:]
+if "--tag" in argv:
+    i = argv.index("--tag")
+    tag = "_" + argv[i + 1]
+    argv = argv[:i] + argv[i + 2:]
+if len(argv) < 1:
+    print("usage: viz_compare.py <video_dir> [--cmd \"...\"] [--tag NAME]")
     sys.exit(1)
 
-vid_dir = Path(sys.argv[1])
+vid_dir = Path(argv[0])
 mp4 = vid_dir / "infrared.mp4"
 gt = json.load(open(vid_dir / "infrared.json"))["gt_rect"]
-out_path = f"/tmp/viz_{vid_dir.name}.mp4"
+out_path = f"/tmp/viz_{vid_dir.name}{tag}.mp4"
 
-# Parse predicted boxes from main stdout.
-out = subprocess.run(["./main", str(mp4)], capture_output=True, text=True).stdout
+# Parse predicted boxes from tracker stdout.
+out = subprocess.run(cmd + [str(mp4)], capture_output=True, text=True).stdout
 boxes = re.findall(r"BOX:(-?\d+),(-?\d+) W,H:(\d+),(\d+)", out)
 print(f"parsed {len(boxes)} pred boxes")
 

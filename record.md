@@ -175,6 +175,51 @@ Format: setting → result on test1 / interference2 (within-5px / within-25px / 
 
 - **Total**: 9.31 ms -> 2.99 ms (3.1x faster). Accuracy on both videos preserved or improved.
 
+### SOCF (Wang et al., Expert Sys Apps 2023) simplified re-implementation
+
+- Branch: `SOTA`. Files: `SOTA_methods/socf/{saliency.py, socf_tracker.py}` + `SOTA_methods/run_socf.py`. Python (numpy + cv2), no PyTorch / no NN.
+
+- Simplification vs original paper: STRCF+ADMM backbone replaced by MOSSE closed-form (A=G*conj(F) / B=|F|^2 / H=A/B). Adaptive PATCH = 2 * max(init_w, init_h) so the search range exceeds inter-frame drone motion. Spatial-disturbance-suppression module retained as masked Gaussian label, but empirically slight regression so off by default. Saliency module DROPPED: paper applies saliency to filter via ADMM; cheap approximation (response * spectral_residual) was harmful (suppresses dim-drone peak — exact failure mode SOCF was supposed to fix).
+
+- Final config: pure MOSSE + adaptive search (USE_SALIENCY=False, USE_DIST=False).
+
+- **test1**: w5 14.2%, w10 51.4%, w25 99.9%, IoU 0.629, mean 9.8, med 9.8
+
+- **interference2**: w5 31.5%, w10 88.2%, w25 100.0%, IoU 0.682, mean 6.8, med 6.5
+
+- **interference6**: w5 1.4%, w10 1.4%, w25 8.0%, IoU 0.019, mean 269.2, med 288.7 (fails)
+
+- **vs C++ DoH+Kalman+CLAHE baseline**: MOSSE-SOCF wins coarse metrics (w25 ~100% on test1/inter2 vs C++ 89.7/96.0; IoU 0.629/0.682 vs 0.615/0.669). MOSSE-SOCF loses fine center accuracy (w5 14/31% vs C++ 50/57%) because correlation-peak picking is sub-pixel-noisy compared to DoH centroid. interference6 fails for both — drone is too dim / too low contrast for either DoH or MOSSE.
+
+- **Conclusion**: simplified MOSSE-based SOCF is a useful coarse-tracking baseline (essentially never loses target on test1/inter2) but fine-precision worse than DoH-centroid C++. The retained "disturbance suppression" mask gives marginal regression, suggesting in this regime the spatial penalty over-aggressively reweights the filter. Don't claim faithful SOCF numbers; the saliency-via-ADMM and STRCF backbone matter for the paper's reported gains.
+
+### MOSSE + 4-state Kalman (cx, cy, vx, vy) wrapper
+
+- Files: `SOTA_methods/socf/kalman_mosse.py` (KalmanMOSSE class) + `SOTA_methods/run_kalman_mosse.py` CLI. Wraps SOCFTracker (= simplified MOSSE) with Kalman gating.
+
+- Tested designs (all on test1, inter2/test28, inter4, inter6):
+
+  1. Kalman predict -> sample patch at predicted center, MOSSE peak as measurement, chi^2 gate, Kalman correct, output Kalman state. test1 mean spiked to 82 (Kalman over-extrapolated when oscillating drone violated constant-velocity assumption).
+
+  2. Damped Q_VEL (50 -> 20 -> 2) + velocity clamp. test1 unchanged (mean ~85). Kalman still hurts.
+
+  3. MOSSE self-samples (no motion prior), Kalman is passive observer + gates outliers. test1 result identical to MOSSE alone (Kalman essentially does nothing).
+
+  4. PSR-weighted fusion: w_mosse = sigmoid((PSR - 8) / 3), output = w * MOSSE_peak + (1 - w) * Kalman_state. PSR consistently >> 8 on all 4 videos -> w ~ 1 -> output = MOSSE_peak. Identical to pure MOSSE.
+
+- **Final results (4 videos)**: identical to MOSSE alone within float noise.
+
+  | metric | MOSSE | +Kalman |
+  |---|---|---|
+  | test1 IoU | 0.629 | 0.629 |
+  | test28(=old inter2) IoU | 0.682 | 0.681 |
+  | inter4 IoU | 0.153 | 0.154 |
+  | inter6 IoU | 0.019 | 0.019 |
+
+- **Conclusion**: Kalman wrapper does NOT improve simplified MOSSE on these videos. Reasons: (a) test1 oscillating drone breaks constant-velocity prior; (b) MOSSE peak is already smooth enough that Kalman smoothing adds lag rather than reducing noise; (c) interference4/6 fail at MOSSE level (drone too dim relative to background) — Kalman cannot recover information MOSSE never extracted. The C++ tracker's Kalman integration succeeds because it runs alongside DoH (which provides multiple detection candidates), CLAHE, and 5-region ego-motion compensation — Kalman in isolation around a single tracker doesn't help.
+
+## Failed/Discarded Approaches
+
 ## Failed/Discarded Approaches
 
 - HOG + Hu Moments fingerprint (16×16 patch on IR is too dominated by background)

@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
-"""Run ./main on a video, parse BOX/W,H stdout, compare to GT json.
+"""Run a tracker command on a video, parse BOX/W,H stdout, compare to GT json.
 Reports w5 / w10 / w25 (% frames within N px center error), IoU mean,
-center-error mean / median."""
-import json, re, subprocess, sys
+center-error mean / median.
+
+Default tracker is ./main (the C++ binary). Override with --cmd "...":
+    eval_one.py <video_dir> --cmd "python SOTA_methods/run_socf.py"
+The video mp4 path is appended as the final argument to <cmd>.
+"""
+import json, re, shlex, subprocess, sys
 from pathlib import Path
 
-if len(sys.argv) < 2:
-    print("usage: eval_one.py <video_dir>  (e.g. Datasets/.../interference2)")
+argv = sys.argv[1:]
+cmd = ["./main"]
+if "--cmd" in argv:
+    i = argv.index("--cmd")
+    cmd = shlex.split(argv[i + 1])
+    argv = argv[:i] + argv[i + 2:]
+if len(argv) < 1:
+    print("usage: eval_one.py <video_dir> [--cmd \"<tracker cmd>\"]")
     sys.exit(1)
 
-vid_dir = Path(sys.argv[1])
+vid_dir = Path(argv[0])
 mp4 = vid_dir / "infrared.mp4"
 gt  = json.load(open(vid_dir / "infrared.json"))["gt_rect"]
 exist = json.load(open(vid_dir / "infrared.json"))["exist"]
 
-out = subprocess.run(["./main", str(mp4)], capture_output=True, text=True).stdout
+out = subprocess.run(cmd + [str(mp4)], capture_output=True, text=True).stdout
 boxes = re.findall(r"BOX:(-?\d+),(-?\d+) W,H:(\d+),(\d+)", out)
 print(f"parsed {len(boxes)} pred boxes (frame 1..N)")
 

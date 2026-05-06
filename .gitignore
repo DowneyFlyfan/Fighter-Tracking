@@ -12,3 +12,6 @@ main
 main_debug
 __pycache__/
 *.pyc
+SOTA_methods/third_party/
+test28.mp4
+*.mp4
